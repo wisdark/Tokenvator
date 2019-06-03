@@ -6,6 +6,9 @@ using System.Management;
 using System.Runtime.InteropServices;
 using System.Text;
 
+using MonkeyWorks.Unmanaged.Headers;
+using MonkeyWorks.Unmanaged.Libraries;
+
 namespace Tokenvator
 {
     class Enumeration
@@ -21,10 +24,10 @@ namespace Tokenvator
             wtsapi32.WTSEnumerateSessions(IntPtr.Zero, 0, 1, ref ppSessionInfo, ref pCount);
             for (Int32 i = 0; i < pCount; i++)
             {
-                IntPtr j = new IntPtr(ppSessionInfo.ToInt32() + (i * Marshal.SizeOf(typeof(wtsapi32._WTS_SESSION_INFO))));
+                IntPtr j = new IntPtr(ppSessionInfo.ToInt64() + (i * Marshal.SizeOf(typeof(wtsapi32._WTS_SESSION_INFO))));
                 wtsapi32._WTS_SESSION_INFO wtsSessionInfo = (wtsapi32._WTS_SESSION_INFO)Marshal.PtrToStructure(j, typeof(wtsapi32._WTS_SESSION_INFO));
-                IntPtr ppBuffer;
-                IntPtr pBytesReturned;
+                IntPtr ppBuffer, pBytesReturned;
+                ppBuffer = pBytesReturned = IntPtr.Zero;
                 if (!wtsapi32.WTSQuerySessionInformationW(IntPtr.Zero, wtsSessionInfo.SessionId, wtsapi32._WTS_INFO_CLASS.WTSUserName, out ppBuffer, out pBytesReturned))
                 {
                     Console.WriteLine("[-] {0}", Marshal.GetLastWin32Error());
@@ -50,7 +53,7 @@ namespace Tokenvator
         ////////////////////////////////////////////////////////////////////////////////
         public static Boolean ConvertTokenStatisticsToUsername(Winnt._TOKEN_STATISTICS tokenStatistics, ref String userName)
         {
-            IntPtr lpLuid = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(Structs._LUID)));
+            IntPtr lpLuid = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(Winnt._LUID)));
             Marshal.StructureToPtr(tokenStatistics.AuthenticationId, lpLuid, false);
             if (IntPtr.Zero == lpLuid)
             {
@@ -74,7 +77,7 @@ namespace Tokenvator
                 return false;
             }
 
-            if (Environment.MachineName+"$" == Marshal.PtrToStringUni(securityLogonSessionData.UserName.Buffer) && ConvertSidToName(securityLogonSessionData.Sid, ref userName))
+            if (Environment.MachineName+"$" == Marshal.PtrToStringUni(securityLogonSessionData.UserName.Buffer) && ConvertSidToName(securityLogonSessionData.Sid, out userName))
             {
                 return true;
 
@@ -87,27 +90,46 @@ namespace Tokenvator
         ////////////////////////////////////////////////////////////////////////////////
         // Converts a SID Byte array to User Name
         ////////////////////////////////////////////////////////////////////////////////
-        public static Boolean ConvertSidToName(IntPtr sid, ref String userName)
+        public static Boolean ConvertSidToName(IntPtr sid, out String userName)
         {
+            StringBuilder sbUserName = new StringBuilder();
+
             StringBuilder lpName = new StringBuilder();
             UInt32 cchName = (UInt32)lpName.Capacity;
             StringBuilder lpReferencedDomainName = new StringBuilder();
             UInt32 cchReferencedDomainName = (UInt32)lpReferencedDomainName.Capacity;
-            Enums._SID_NAME_USE sidNameUser;
-            advapi32.LookupAccountSid(String.Empty, sid, lpName, ref cchName, lpReferencedDomainName, ref cchReferencedDomainName, out sidNameUser);
+            Winnt._SID_NAME_USE sidNameUse = new Winnt._SID_NAME_USE();
+            advapi32.LookupAccountSid(String.Empty, sid, lpName, ref cchName, lpReferencedDomainName, ref cchReferencedDomainName, out sidNameUse);
 
-            lpName.EnsureCapacity((Int32)cchName);
-            lpReferencedDomainName.EnsureCapacity((Int32)cchReferencedDomainName);
-            if (advapi32.LookupAccountSid(String.Empty, sid, lpName, ref cchName, lpReferencedDomainName, ref cchReferencedDomainName, out sidNameUser))
+            lpName.EnsureCapacity((Int32)cchName + 1);
+            lpReferencedDomainName.EnsureCapacity((Int32)cchReferencedDomainName + 1);
+            advapi32.LookupAccountSid(String.Empty, sid, lpName, ref cchName, lpReferencedDomainName, ref cchReferencedDomainName, out sidNameUse);
+
+            if (lpReferencedDomainName.Length > 0)
+            {
+                sbUserName.Append(lpReferencedDomainName);
+            }
+
+            if (sbUserName.Length > 0)
+            {
+                sbUserName.Append(@"\");
+            }
+
+            if (lpName.Length > 0)
+            {
+                sbUserName.Append(lpName);
+            }
+
+            userName = sbUserName.ToString();
+
+            if (String.IsNullOrEmpty(userName))
             {
                 return false;
             }
-            if (String.IsNullOrEmpty(lpName.ToString()) || String.IsNullOrEmpty(lpReferencedDomainName.ToString()))
+            else
             {
-                return false;
+                return true;
             }
-            userName = lpReferencedDomainName.ToString() + "\\" + lpName.ToString();
-            return true;
         }
 
         ////////////////////////////////////////////////////////////////////////////////
@@ -125,7 +147,7 @@ namespace Tokenvator
                     continue;
                 }
                 IntPtr hToken;
-                if (!kernel32.OpenProcessToken(hProcess, (UInt32)Enums.ACCESS_MASK.MAXIMUM_ALLOWED, out hToken))
+                if (!kernel32.OpenProcessToken(hProcess, (UInt32)Winnt.ACCESS_MASK.MAXIMUM_ALLOWED, out hToken))
                 {
                     continue;
                 }
@@ -141,14 +163,14 @@ namespace Tokenvator
                 UInt32 dwLength = 0;
                 Winnt._TOKEN_STATISTICS tokenStatistics = new Winnt._TOKEN_STATISTICS();
                 //Split up impersonation and primary tokens
-                if (Winnt.TOKEN_TYPE.TokenImpersonation == tokenStatistics.TokenType)
+                if (Winnt._TOKEN_TYPE.TokenImpersonation == tokenStatistics.TokenType)
                 {
                     continue;
                 }
 
-                if (!advapi32.GetTokenInformation(hToken, Enums._TOKEN_INFORMATION_CLASS.TokenStatistics, ref tokenStatistics, dwLength, out dwLength))
+                if (!advapi32.GetTokenInformation(hToken, Winnt._TOKEN_INFORMATION_CLASS.TokenStatistics, ref tokenStatistics, dwLength, out dwLength))
                 {
-                    if (!advapi32.GetTokenInformation(hToken, Enums._TOKEN_INFORMATION_CLASS.TokenStatistics, ref tokenStatistics, dwLength, out dwLength))
+                    if (!advapi32.GetTokenInformation(hToken, Winnt._TOKEN_INFORMATION_CLASS.TokenStatistics, ref tokenStatistics, dwLength, out dwLength))
                     {
                         Console.WriteLine("GetTokenInformation: {0}", Marshal.GetLastWin32Error());
                         continue;
@@ -223,7 +245,7 @@ namespace Tokenvator
                     continue;
                 }
                 IntPtr hToken;
-                if (!kernel32.OpenProcessToken(hProcess, (UInt32)Enums.ACCESS_MASK.MAXIMUM_ALLOWED, out hToken))
+                if (!kernel32.OpenProcessToken(hProcess, (UInt32)Winnt.ACCESS_MASK.MAXIMUM_ALLOWED, out hToken))
                 {
                     continue;
                 }
@@ -236,16 +258,16 @@ namespace Tokenvator
 
                 UInt32 dwLength = 0;
                 Winnt._TOKEN_STATISTICS tokenStatistics = new Winnt._TOKEN_STATISTICS();
-                if (!advapi32.GetTokenInformation(hToken, Enums._TOKEN_INFORMATION_CLASS.TokenStatistics, ref tokenStatistics, dwLength, out dwLength))
+                if (!advapi32.GetTokenInformation(hToken, Winnt._TOKEN_INFORMATION_CLASS.TokenStatistics, ref tokenStatistics, dwLength, out dwLength))
                 {
-                    if (!advapi32.GetTokenInformation(hToken, Enums._TOKEN_INFORMATION_CLASS.TokenStatistics, ref tokenStatistics, dwLength, out dwLength))
+                    if (!advapi32.GetTokenInformation(hToken, Winnt._TOKEN_INFORMATION_CLASS.TokenStatistics, ref tokenStatistics, dwLength, out dwLength))
                     {
                         continue;
                     }
                 }
                 kernel32.CloseHandle(hToken);
 
-                if (Winnt.TOKEN_TYPE.TokenImpersonation == tokenStatistics.TokenType)
+                if (Winnt._TOKEN_TYPE.TokenImpersonation == tokenStatistics.TokenType)
                 {
                     continue;
                 }
